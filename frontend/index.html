@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vision RAG — Umesh's AI</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- Marked.js: Client-side Markdown → HTML rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+
+<div class="app-container">
+
+  <!-- ════════════════════════════════════════════════════
+       SIDEBAR — Upload + Document Status
+  ════════════════════════════════════════════════════ -->
+  <aside class="sidebar">
+
+    <!-- Logo -->
+    <div class="sidebar-logo">
+      <div class="logo-icon">🔍</div>
+      <div>
+        <h1>Vision RAG</h1>
+        <span>ColPali + Gemini</span>
+      </div>
+    </div>
+
+    <!-- Upload Section -->
+    <div class="upload-section">
+      <h2>Document</h2>
+
+      <!-- Drag-and-drop zone (also acts as click target) -->
+      <div class="upload-drop-zone" id="drop-zone">
+        <span class="upload-icon">📄</span>
+        <p>
+          <strong>Click to upload</strong> or drag & drop<br>
+          PDF files only
+        </p>
+        <!-- Hidden native file input -->
+        <input type="file" id="pdf-file-input" accept=".pdf" />
+      </div>
+
+      <!-- Upload progress bar + status text -->
+      <div class="upload-status" id="upload-status" style="display:none;">
+        <div class="upload-status-bar">
+          <div class="upload-status-bar-fill" id="upload-bar-fill"></div>
+        </div>
+        <span class="upload-status-text" id="upload-status-text">Uploading...</span>
+      </div>
+
+      <!-- Card shown after successful upload -->
+      <div class="doc-card" id="doc-card">
+        <div class="doc-card-name" id="doc-card-name">—</div>
+        <div class="doc-card-meta" id="doc-card-meta">Indexed and ready</div>
+        <div class="doc-card-badge">✓ Index Ready</div>
+      </div>
+    </div>
+
+    <!-- Clear Memory Button -->
+    <div class="sidebar-footer">
+      <button class="clear-btn" id="clear-btn" title="Clear conversation history">
+        🗑 Clear Conversation
+      </button>
+    </div>
+
+  </aside>
+
+  <!-- ════════════════════════════════════════════════════
+       MAIN CHAT AREA
+  ════════════════════════════════════════════════════ -->
+  <main class="chat-area">
+
+    <!-- Chat Header -->
+    <header class="chat-header">
+      <h2>Chat with your Document</h2>
+      <span class="chat-header-meta" id="header-meta">No document loaded</span>
+    </header>
+
+    <!-- Messages Window -->
+    <div class="messages-window" id="messages-window">
+
+      <!-- Welcome screen (hidden once messages appear) -->
+      <div class="welcome-message" id="welcome-message">
+        <div class="welcome-icon">🤖</div>
+        <h3>Hello, Umesh!</h3>
+        <p>
+          Upload a PDF in the sidebar and I'll index it using
+          ColPali's visual embeddings. Then ask me anything about it.
+        </p>
+      </div>
+
+    </div>
+
+    <!-- Input Bar -->
+    <div class="input-bar">
+      <div class="input-form">
+        <div class="input-wrapper">
+          <textarea
+            id="chat-input"
+            placeholder="Ask anything about your document…"
+            rows="1"
+          ></textarea>
+        </div>
+        <button class="send-btn" id="send-btn" title="Send (Enter)">
+          ➤
+        </button>
+      </div>
+      <div class="input-hint">
+        Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line
+      </div>
+    </div>
+
+  </main>
+
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
