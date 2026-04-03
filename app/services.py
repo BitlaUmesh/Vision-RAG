@@ -5,6 +5,8 @@ from typing import List, Optional
 
 import requests as http_requests
 
+from app.ocr import extract_text_hybrid
+
 logger = logging.getLogger(__name__)
 
 _API_TIMEOUT = 60  # Groq is fast, but give enough time for long prompts
@@ -55,7 +57,9 @@ class VisionService:
             doc = fitz.open(pdf_path)
             for p in page_numbers:
                 if 1 <= p <= len(doc):
-                    parts.append(f"\n--- Page {p} ---\n{doc[p - 1].get_text()}\n")
+                    page = doc[p - 1]
+                    text = extract_text_hybrid(page)
+                    parts.append(f"\n--- Page {p} ---\n{text}\n")
         except Exception as e:
             logger.error(f"PDF text extraction error: {e}")
         finally:
@@ -76,7 +80,12 @@ class VisionService:
             prompt += (
                 "You are a helpful document assistant. If the user asks about the document, "
                 "answer based on the retrieved context above. If the user's message is casual "
-                "small-talk or a greeting, respond naturally and conversationally."
+                "small-talk or a greeting, respond naturally and conversationally.\n\n"
+                "IMPORTANT: Some of the document text may have been extracted via OCR from "
+                "handwritten pages. This means there could be minor spelling errors, merged "
+                "words, or misrecognized characters. Use context clues to interpret the "
+                "intended meaning. Do NOT point out OCR artifacts unless the user asks "
+                "about text quality."
             )
         else:
             prompt += (

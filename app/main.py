@@ -102,10 +102,15 @@ async def upload_pdf(file: UploadFile = File(...)):
     try:
         engine.rebuild_index(current_pdf_path)
         page_count = len(engine._pages_info)
+        ocr_count = engine.ocr_page_count
+        index_msg = f"Indexed {page_count} pages"
+        if ocr_count > 0:
+            index_msg += f" ({ocr_count} handwritten pages via OCR)"
         return {
             "filename": file.filename,
-            "index_status": f"Indexed {page_count} pages",
+            "index_status": index_msg,
             "status": "success",
+            "ocr_pages": ocr_count,
         }
     except Exception as e:
         logger.error(f"Indexing failed: {e}", exc_info=True)

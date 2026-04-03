@@ -300,7 +300,7 @@ async function uploadPdf(file) {
 
   try {
     animateBar(60); // Fake mid-progress (indexing is slow)
-    setUploadStatus('Indexing pages — this may take a minute...', 60, '');
+    setUploadStatus('Indexing pages & scanning for handwriting (OCR)...', 60, '');
 
     const response = await fetch(`${BASE_URL}/upload`, {
       method: 'POST',
@@ -315,6 +315,10 @@ async function uploadPdf(file) {
     const data = await response.json();
 
     animateBar(100);
+
+    const ocrInfo = data.ocr_pages > 0
+      ? ` · ✍️ ${data.ocr_pages} handwritten page(s) detected`
+      : '';
     setUploadStatus(`✓ ${data.index_status}`, 100, 'success');
 
     // Update document card
@@ -322,13 +326,13 @@ async function uploadPdf(file) {
     docCardName.textContent = data.filename;
     docCardMeta.textContent = data.index_status;
     docCard.classList.add('visible');
-    headerMeta.textContent = `Indexed: ${data.filename}`;
+    headerMeta.textContent = `Indexed: ${data.filename}${ocrInfo}`;
 
     // Clear conversation since this is a new document
     messagesWindow.innerHTML = '';
-    renderWelcomeBack(data.filename);
+    renderWelcomeBack(data.filename, data.ocr_pages || 0);
 
-    console.info(`[VisionRAG] Uploaded & indexed: ${data.filename}`);
+    console.info(`[VisionRAG] Uploaded & indexed: ${data.filename} (OCR pages: ${data.ocr_pages || 0})`);
 
   } catch (err) {
     animateBar(0);
@@ -350,14 +354,20 @@ function animateBar(target) {
 /**
  * Show a contextual welcome message after a document is indexed.
  */
-function renderWelcomeBack(filename) {
+function renderWelcomeBack(filename, ocrPages = 0) {
   const div = document.createElement('div');
   div.className = 'welcome-message';
   div.style.flex = '1';
+
+  const ocrNote = ocrPages > 0
+    ? `<p style="margin-top:8px;opacity:0.8;">✍️ Detected <strong>${ocrPages}</strong> handwritten page(s) — OCR was used to extract text.</p>`
+    : '';
+
   div.innerHTML = `
     <div class="welcome-icon">✅</div>
     <h3>${escapeHtml(filename)} is ready!</h3>
     <p>The document has been indexed. Ask me anything about it below.</p>
+    ${ocrNote}
   `;
   messagesWindow.appendChild(div);
 }
