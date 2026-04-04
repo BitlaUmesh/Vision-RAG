@@ -3,41 +3,68 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Vision RAG — Umesh's AI</title>
-  <link rel="stylesheet" href="style.css" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Vision RAG — AI Document Intelligence</title>
+  <meta name="description" content="Upload PDFs and chat with your documents using AI-powered retrieval augmented generation." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=20260404" />
   <!-- Marked.js: Client-side Markdown → HTML rendering -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
+
+<!-- Background ambient glow orbs -->
+<div class="ambient-glow">
+  <div class="glow-orb glow-orb-1"></div>
+  <div class="glow-orb glow-orb-2"></div>
+  <div class="glow-orb glow-orb-3"></div>
+</div>
 
 <div class="app-container">
 
   <!-- ════════════════════════════════════════════════════
        SIDEBAR — Upload + Document Status
   ════════════════════════════════════════════════════ -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
 
     <!-- Logo -->
     <div class="sidebar-logo">
-      <div class="logo-icon">🔍</div>
+      <div class="logo-icon">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="m21 21-4.3-4.3"/>
+          <path d="M11 8v6"/>
+          <path d="M8 11h6"/>
+        </svg>
+      </div>
       <div>
         <h1>Vision RAG</h1>
-        <span>ColPali + Gemini</span>
+        <span class="logo-subtitle">AI Document Intelligence</span>
       </div>
     </div>
 
     <!-- Upload Section -->
     <div class="upload-section">
-      <h2>Document</h2>
+      <div class="section-label">Document</div>
 
-      <!-- Drag-and-drop zone (also acts as click target) -->
+      <!-- Drag-and-drop zone -->
       <div class="upload-drop-zone" id="drop-zone">
-        <span class="upload-icon">📄</span>
-        <p>
-          <strong>Click to upload</strong> or drag & drop<br>
-          PDF files only
+        <div class="upload-icon-wrapper">
+          <svg class="upload-icon-svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <p class="upload-text">
+          <strong>Drop your PDF here</strong>
+          <span>or click to browse</span>
         </p>
-        <!-- Hidden native file input -->
+        <span class="upload-hint">PDF files • Max 50MB</span>
         <input type="file" id="pdf-file-input" accept=".pdf" />
       </div>
 
@@ -51,16 +78,33 @@
 
       <!-- Card shown after successful upload -->
       <div class="doc-card" id="doc-card">
-        <div class="doc-card-name" id="doc-card-name">—</div>
-        <div class="doc-card-meta" id="doc-card-meta">Indexed and ready</div>
-        <div class="doc-card-badge">✓ Index Ready</div>
+        <div class="doc-card-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+          </svg>
+        </div>
+        <div class="doc-card-info">
+          <div class="doc-card-name" id="doc-card-name">—</div>
+          <div class="doc-card-meta" id="doc-card-meta">Indexed and ready</div>
+        </div>
+        <div class="doc-card-badge">
+          <span class="badge-dot"></span>
+          Index Ready
+        </div>
       </div>
     </div>
 
-    <!-- Clear Memory Button -->
+    <!-- Sidebar Footer -->
     <div class="sidebar-footer">
       <button class="clear-btn" id="clear-btn" title="Clear conversation history">
-        🗑 Clear Conversation
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        </svg>
+        Clear Conversation
       </button>
     </div>
 
@@ -73,21 +117,53 @@
 
     <!-- Chat Header -->
     <header class="chat-header">
-      <h2>Chat with your Document</h2>
-      <span class="chat-header-meta" id="header-meta">No document loaded</span>
+      <div class="chat-header-left">
+        <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="3" y1="12" x2="21" y2="12"/>
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
+        </button>
+        <h2>Chat with your Document</h2>
+      </div>
+      <div class="chat-header-right">
+        <span class="status-dot" id="status-dot"></span>
+        <span class="chat-header-meta" id="header-meta">No document loaded</span>
+      </div>
     </header>
 
     <!-- Messages Window -->
     <div class="messages-window" id="messages-window">
 
-      <!-- Welcome screen (hidden once messages appear) -->
+      <!-- Welcome screen -->
       <div class="welcome-message" id="welcome-message">
-        <div class="welcome-icon">🤖</div>
+        <div class="welcome-glow"></div>
+        <div class="welcome-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="url(#welcomeGrad)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <defs>
+              <linearGradient id="welcomeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" style="stop-color:#a3a6ff"/>
+                <stop offset="100%" style="stop-color:#c180ff"/>
+              </linearGradient>
+            </defs>
+            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/>
+            <path d="M12 16v-4"/>
+            <path d="M12 8h.01"/>
+          </svg>
+        </div>
         <h3>Hello, Umesh!</h3>
         <p>
-          Upload a PDF in the sidebar and I'll index it using
-          ColPali's visual embeddings. Then ask me anything about it.
+          Upload a PDF in the sidebar and I'll analyze it using
+          AI-powered document intelligence. Then ask me anything about it.
         </p>
+        <div class="welcome-chips">
+          <span class="chip">📄 Supports printed PDFs</span>
+          <span class="chip">✍️ Reads handwriting via AI Vision</span>
+          <span class="chip">📊 Understands diagrams & tables</span>
+          <span class="chip">🖼️ Analyzes charts & images</span>
+          <span class="chip">🔍 Smart page retrieval</span>
+        </div>
       </div>
 
     </div>
@@ -103,7 +179,10 @@
           ></textarea>
         </div>
         <button class="send-btn" id="send-btn" title="Send (Enter)">
-          ➤
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
         </button>
       </div>
       <div class="input-hint">
@@ -115,6 +194,61 @@
 
 </div>
 
-<script src="script.js"></script>
+<!-- ════════════════════════════════════════════════════
+     FULL-SCREEN UPLOAD OVERLAY
+════════════════════════════════════════════════════ -->
+<div class="upload-overlay" id="upload-overlay">
+  <div class="upload-overlay-content">
+    <!-- Animated rings -->
+    <div class="upload-spinner">
+      <div class="spinner-ring ring-1"></div>
+      <div class="spinner-ring ring-2"></div>
+      <div class="spinner-ring ring-3"></div>
+      <div class="spinner-icon">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- File info -->
+    <h2 class="upload-overlay-title" id="overlay-title">Processing Document</h2>
+    <p class="upload-overlay-filename" id="overlay-filename">document.pdf</p>
+
+    <!-- Step progress -->
+    <div class="upload-steps" id="upload-steps">
+      <div class="upload-step active" id="step-upload">
+        <div class="step-icon">📤</div>
+        <div class="step-label">Uploading</div>
+      </div>
+      <div class="step-connector"></div>
+      <div class="upload-step" id="step-ocr">
+        <div class="step-icon">🔍</div>
+        <div class="step-label">Extracting Text</div>
+      </div>
+      <div class="step-connector"></div>
+      <div class="upload-step" id="step-visual">
+        <div class="step-icon">🖼️</div>
+        <div class="step-label">Analyzing Visuals</div>
+      </div>
+      <div class="step-connector"></div>
+      <div class="upload-step" id="step-index">
+        <div class="step-icon">⚡</div>
+        <div class="step-label">Building Index</div>
+      </div>
+    </div>
+
+    <!-- Progress bar -->
+    <div class="overlay-progress-bar">
+      <div class="overlay-progress-fill" id="overlay-progress-fill"></div>
+    </div>
+    <p class="overlay-status-text" id="overlay-status-text">Preparing upload...</p>
+  </div>
+</div>
+
+<script src="script.js?v=20260404b"></script>
 </body>
 </html>

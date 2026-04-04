@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import requests as http_requests
 
@@ -9,26 +9,32 @@ from app.ocr import extract_text_hybrid
 
 logger = logging.getLogger(__name__)
 
-_API_TIMEOUT = 60  # Groq is fast, but give enough time for long prompts
+_API_TIMEOUT = 90
 
 
 class VisionService:
-    """Generates answers using the Groq API (OpenAI-compatible)."""
+    """Generates answers using Groq API — text + multimodal vision."""
 
-    FALLBACK_MODELS = [
+    TEXT_MODELS = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
         "mixtral-8x7b-32768",
     ]
+
+    VISION_MODELS = [
+        os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+    ]
+
     API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
         if not self.api_key:
-            raise RuntimeError("GROQ_API_KEY not set in .env — get one free at https://console.groq.com/keys")
+            raise RuntimeError("GROQ_API_KEY not set in .env")
         configured = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-        self.models = [configured] + [m for m in self.FALLBACK_MODELS if m != configured]
-        logger.info(f"Groq models (priority): {self.models}")
+        self.text_models = [configured] + [m for m in self.TEXT_MODELS if m != configured]
+        logger.info(f"Text models: {self.text_models}")
+        logger.info(f"Vision models: {self.VISION_MODELS}")
 
     # ── public ────────────────────────────────────────────────────────────
 
@@ -39,19 +45,40 @@ class VisionService:
         pdf_path: Optional[str],
         chat_history: str,
         needs_rag: bool = True,
+        engine=None,
     ) -> str:
-        context_text = self._extract_context(page_numbers, pdf_path)
+        context_text = self._extract_context(page_numbers, pdf_path, engine)
         system_prompt = self._build_system_prompt(context_text, chat_history, needs_rag)
-        return self._call_groq(system_prompt, query)
+
+        # Get page images for multimodal vision call
+        page_images: Dict[int, str] = {}
+        if needs_rag and engine and page_numbers:
+            page_images = engine.get_page_images(page_numbers)
+
+        if page_images:
+            return self._call_vision(system_prompt, query, page_images)
+        else:
+            return self._call_text(system_prompt, query)
 
     # ── context extraction ────────────────────────────────────────────────
 
     @staticmethod
-    def _extract_context(page_numbers: List[int], pdf_path: Optional[str]) -> str:
+    def _extract_context(page_numbers, pdf_path, engine=None):
         if not page_numbers or not pdf_path:
             return ""
-        doc = None
         parts = []
+        if engine:
+            for p in page_numbers:
+                info = engine.get_page_info(p)
+                if info:
+                    part = f"\n--- Page {p} ---\n{info['text']}\n"
+                    if info.get("visual_description"):
+                        part += f"\n[VISUAL CONTENT on Page {p}]\n{info['visual_description']}\n"
+                    parts.append(part)
+            if parts:
+                return "".join(parts)
+
+        doc = None
         try:
             import pymupdf as fitz
             doc = fitz.open(pdf_path)
@@ -61,7 +88,7 @@ class VisionService:
                     text = extract_text_hybrid(page)
                     parts.append(f"\n--- Page {p} ---\n{text}\n")
         except Exception as e:
-            logger.error(f"PDF text extraction error: {e}")
+            logger.error(f"PDF extraction error: {e}")
         finally:
             if doc:
                 doc.close()
@@ -78,14 +105,27 @@ class VisionService:
             prompt += f"Retrieved document context:\n{context}\n\n"
         if needs_rag:
             prompt += (
-                "You are a helpful document assistant. If the user asks about the document, "
-                "answer based on the retrieved context above. If the user's message is casual "
-                "small-talk or a greeting, respond naturally and conversationally.\n\n"
-                "IMPORTANT: Some of the document text may have been extracted via OCR from "
-                "handwritten pages. This means there could be minor spelling errors, merged "
-                "words, or misrecognized characters. Use context clues to interpret the "
-                "intended meaning. Do NOT point out OCR artifacts unless the user asks "
-                "about text quality."
+                "You are a precise document assistant with VISUAL understanding. "
+                "You have access to the actual document pages — both extracted text and "
+                "page images. You can see and interpret diagrams, tables, charts, "
+                "flowcharts, and any visual elements.\n\n"
+                "CRITICAL RULES:\n"
+                "1. ALWAYS answer from the retrieved document context provided above. "
+                "The context contains the relevant pages from the user's uploaded document.\n"
+                "2. NEVER say 'I don't have information' or 'I can't find' when document "
+                "context is provided above — the answer IS in the context, find it.\n"
+                "3. Be ACCURATE and FAITHFUL to the document content. Quote or paraphrase "
+                "directly from the text. Do not make up information.\n"
+                "4. When the user refers to 'questions', 'points', 'items', or numbered "
+                "content, look for them in the document context and reproduce them exactly.\n"
+                "5. If the user asks about diagrams, charts, or tables, describe what you "
+                "see in the page images directly.\n"
+                "6. For tables, extract and present data in a clear markdown table format.\n"
+                "7. If you are shown page images, READ THE TEXT DIRECTLY from the images "
+                "for maximum accuracy — do not rely solely on the OCR-extracted text.\n\n"
+                "IMPORTANT: The document text was extracted via OCR from handwritten pages. "
+                "There may be minor OCR errors. If the page images are provided, read the "
+                "actual handwriting in the images for the most accurate answer."
             )
         else:
             prompt += (
@@ -94,66 +134,119 @@ class VisionService:
             )
         return prompt
 
-    # ── Groq API calls ────────────────────────────────────────────────────
+    # ── Text-only call ────────────────────────────────────────────────────
 
-    def _call_groq(self, system_prompt: str, user_message: str) -> str:
-        """Try each model with retry on rate-limit."""
+    def _call_text(self, system_prompt: str, user_message: str) -> str:
         last_err = None
-
-        for model in self.models:
+        for model in self.text_models:
             for attempt in range(2):
                 try:
-                    return self._single_call(model, system_prompt, user_message)
+                    headers = {
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    }
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_message},
+                        ],
+                        "temperature": 0.5,
+                        "max_tokens": 4096,
+                    }
+                    logger.info(f"→ TEXT {model}")
+                    resp = http_requests.post(self.API_URL, headers=headers, json=payload, timeout=_API_TIMEOUT)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        return choices[0].get("message", {}).get("content", "No content.")
+                    return "No response generated."
                 except http_requests.exceptions.Timeout:
-                    logger.warning(f"{model} timed out (attempt {attempt + 1})")
-                    last_err = "Request timed out"
+                    last_err = "timeout"
                     break
                 except http_requests.exceptions.HTTPError as e:
-                    code = e.response.status_code if e.response is not None else 0
+                    code = e.response.status_code if e.response else 0
                     if code == 429:
-                        logger.warning(f"{model} rate-limited, waiting...")
-                        last_err = "Rate limited"
+                        last_err = "rate-limited"
                         time.sleep(3 * (attempt + 1))
                         continue
                     elif code == 404:
-                        logger.warning(f"{model} not found, skipping")
-                        last_err = f"Model {model} not available"
+                        last_err = f"{model} not found"
                         break
                     else:
-                        body = e.response.text[:200] if e.response is not None else str(e)
-                        logger.error(f"Groq HTTP {code}: {body}")
+                        body = e.response.text[:200] if e.response else str(e)
                         return f"⚠️ API error ({code}): {body}"
                 except Exception as e:
-                    logger.error(f"Groq call failed: {e}", exc_info=True)
-                    return f"⚠️ Generation error: {e}"
+                    return f"⚠️ Error: {e}"
+        return f"⚠️ All models failed ({last_err}). Please wait and try again."
 
-        return (
-            f"⚠️ All models are currently rate-limited ({last_err}). "
-            "Please wait a moment and try again."
-        )
+    # ── Multimodal vision call ────────────────────────────────────────────
 
-    def _single_call(self, model: str, system_prompt: str, user_message: str) -> str:
-        """One request to the Groq chat completions API."""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 2048,
-        }
-        logger.info(f"→ Groq {model}")
+    def _call_vision(self, system_prompt: str, user_message: str, page_images: Dict[int, str]) -> str:
+        last_err = None
 
-        resp = http_requests.post(self.API_URL, headers=headers, json=payload, timeout=_API_TIMEOUT)
-        resp.raise_for_status()
+        # Build multimodal content
+        user_content = [{"type": "text", "text": user_message}]
+        sorted_pages = sorted(page_images.keys())[:4]
+        for page_num in sorted_pages:
+            user_content.append({"type": "text", "text": f"\n[Page {page_num} image:]"})
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{page_images[page_num]}"},
+            })
 
-        data = resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            return "No response generated."
-        return choices[0].get("message", {}).get("content", "No content in response.")
+        logger.info(f"→ VISION with {len(sorted_pages)} pages: {sorted_pages}")
+
+        for model in self.VISION_MODELS:
+            for attempt in range(3):
+                try:
+                    headers = {
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    }
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_content},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 4096,
+                    }
+                    logger.info(f"→ VISION {model} (attempt {attempt + 1})")
+                    resp = http_requests.post(self.API_URL, headers=headers, json=payload, timeout=_API_TIMEOUT)
+
+                    if resp.status_code == 429:
+                        wait = 5 * (attempt + 1)
+                        logger.warning(f"{model} rate-limited, waiting {wait}s...")
+                        last_err = "rate-limited"
+                        time.sleep(wait)
+                        continue
+                    if resp.status_code == 404:
+                        last_err = f"{model} not found"
+                        break
+                    if resp.status_code == 400:
+                        body = resp.text[:300]
+                        last_err = f"400: {body[:100]}"
+                        break
+
+                    resp.raise_for_status()
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        content = choices[0].get("message", {}).get("content", "")
+                        if content.strip():
+                            return content.strip()
+                    last_err = "empty response"
+                    break
+                except http_requests.exceptions.Timeout:
+                    last_err = "timeout"
+                    break
+                except Exception as e:
+                    last_err = str(e)
+                    break
+
+        # Fallback to text-only
+        logger.warning(f"Vision failed ({last_err}), falling back to text-only")
+        return self._call_text(system_prompt, user_message)

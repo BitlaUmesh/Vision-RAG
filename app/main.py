@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.engine import VisionEngine
 from app.memory import ChatMemory
@@ -40,22 +42,38 @@ async def lifespan(app: FastAPI):
 
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Load existing PDF + index
+    # Load existing PDF + index IN BACKGROUND (non-blocking)
     existing = list(UPLOAD_DIR.glob("*.pdf"))
     if existing:
         latest = max(existing, key=lambda p: p.stat().st_mtime)
         current_pdf_path = str(latest)
         logger.info(f"Found existing PDF: {current_pdf_path}")
-        try:
-            engine.load_or_create_index(current_pdf_path)
-        except Exception as e:
-            logger.warning(f"Index load failed: {e}")
+        import threading
+        def _bg_index():
+            try:
+                engine.load_or_create_index(current_pdf_path)
+            except Exception as e:
+                logger.warning(f"Background index failed: {e}")
+        threading.Thread(target=_bg_index, daemon=True).start()
+        logger.info("Indexing started in background — server is ready")
 
     yield
     logger.info("Shutdown complete.")
 
 app = FastAPI(title="Vision RAG - Phase 1", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# No-cache middleware — prevents browsers from caching static files
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.endswith(('.html', '.css', '.js', '/')):
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+        return response
+
+app.add_middleware(NoCacheMiddleware)
 
 class ChatRequest(BaseModel):
     message: str
@@ -103,14 +121,18 @@ async def upload_pdf(file: UploadFile = File(...)):
         engine.rebuild_index(current_pdf_path)
         page_count = len(engine._pages_info)
         ocr_count = engine.ocr_page_count
+        visual_count = engine.visual_page_count
         index_msg = f"Indexed {page_count} pages"
         if ocr_count > 0:
             index_msg += f" ({ocr_count} handwritten pages via OCR)"
+        if visual_count > 0:
+            index_msg += f" · {visual_count} pages with visual content analyzed"
         return {
             "filename": file.filename,
             "index_status": index_msg,
             "status": "success",
             "ocr_pages": ocr_count,
+            "visual_pages": visual_count,
         }
     except Exception as e:
         logger.error(f"Indexing failed: {e}", exc_info=True)
@@ -134,7 +156,8 @@ async def chat(request: ChatRequest):
         page_numbers=retrieved_pages,
         pdf_path=current_pdf_path,
         chat_history=history,
-        needs_rag=needs_rag
+        needs_rag=needs_rag,
+        engine=engine,
     )
 
     memory.add(user_msg, answer)
