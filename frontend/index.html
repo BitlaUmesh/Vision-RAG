@@ -7,13 +7,15 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Vision RAG — AI Document Intelligence</title>
-  <meta name="description" content="Upload PDFs and chat with your documents using AI-powered retrieval augmented generation." />
+  <meta name="description" content="Upload PDFs and chat with your documents using AI-powered retrieval augmented generation with real-time streaming and interactive PDF viewing." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20260404" />
+  <link rel="stylesheet" href="style.css?v=20260404c" />
   <!-- Marked.js: Client-side Markdown → HTML rendering -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- PDF.js: Client-side PDF rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.min.mjs" type="module"></script>
 </head>
 <body>
 
@@ -111,11 +113,11 @@
   </aside>
 
   <!-- ════════════════════════════════════════════════════
-       MAIN CHAT AREA
+       MAIN CONTENT — Split Pane: Chat + PDF Viewer
   ════════════════════════════════════════════════════ -->
-  <main class="chat-area">
+  <main class="main-content" id="main-content">
 
-    <!-- Chat Header -->
+    <!-- Chat Header (spans full width) -->
     <header class="chat-header">
       <div class="chat-header-left">
         <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar">
@@ -128,66 +130,141 @@
         <h2>Chat with your Document</h2>
       </div>
       <div class="chat-header-right">
+        <button class="pdf-toggle-btn" id="pdf-toggle-btn" title="Toggle PDF viewer">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+          </svg>
+          <span class="pdf-toggle-label" id="pdf-toggle-label">Show PDF</span>
+        </button>
         <span class="status-dot" id="status-dot"></span>
         <span class="chat-header-meta" id="header-meta">No document loaded</span>
       </div>
     </header>
 
-    <!-- Messages Window -->
-    <div class="messages-window" id="messages-window">
+    <!-- Split Pane Container -->
+    <div class="split-pane" id="split-pane">
 
-      <!-- Welcome screen -->
-      <div class="welcome-message" id="welcome-message">
-        <div class="welcome-glow"></div>
-        <div class="welcome-icon">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="url(#welcomeGrad)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <defs>
-              <linearGradient id="welcomeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" style="stop-color:#a3a6ff"/>
-                <stop offset="100%" style="stop-color:#c180ff"/>
-              </linearGradient>
-            </defs>
-            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/>
-            <path d="M12 16v-4"/>
-            <path d="M12 8h.01"/>
-          </svg>
+      <!-- ═══ LEFT: Chat Panel ═══ -->
+      <div class="chat-panel" id="chat-panel">
+
+        <!-- Messages Window -->
+        <div class="messages-window" id="messages-window">
+
+          <!-- Welcome screen -->
+          <div class="welcome-message" id="welcome-message">
+            <div class="welcome-glow"></div>
+            <div class="welcome-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="url(#welcomeGrad)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <defs>
+                  <linearGradient id="welcomeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" style="stop-color:#a3a6ff"/>
+                    <stop offset="100%" style="stop-color:#c180ff"/>
+                  </linearGradient>
+                </defs>
+                <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/>
+                <path d="M12 16v-4"/>
+                <path d="M12 8h.01"/>
+              </svg>
+            </div>
+            <h3>Hello, Umesh!</h3>
+            <p>
+              Upload a PDF in the sidebar and I'll analyze it using
+              AI-powered document intelligence. Then ask me anything about it.
+            </p>
+            <div class="welcome-chips">
+              <span class="chip">📄 Supports printed PDFs</span>
+              <span class="chip">✍️ Reads handwriting via AI Vision</span>
+              <span class="chip">📊 Understands diagrams & tables</span>
+              <span class="chip">🖼️ Analyzes charts & images</span>
+              <span class="chip">⚡ Real-time streaming responses</span>
+            </div>
+          </div>
+
         </div>
-        <h3>Hello, Umesh!</h3>
-        <p>
-          Upload a PDF in the sidebar and I'll analyze it using
-          AI-powered document intelligence. Then ask me anything about it.
-        </p>
-        <div class="welcome-chips">
-          <span class="chip">📄 Supports printed PDFs</span>
-          <span class="chip">✍️ Reads handwriting via AI Vision</span>
-          <span class="chip">📊 Understands diagrams & tables</span>
-          <span class="chip">🖼️ Analyzes charts & images</span>
-          <span class="chip">🔍 Smart page retrieval</span>
+
+        <!-- Input Bar -->
+        <div class="input-bar">
+          <div class="input-form">
+            <div class="input-wrapper">
+              <textarea
+                id="chat-input"
+                placeholder="Ask anything about your document…"
+                rows="1"
+              ></textarea>
+            </div>
+            <button class="send-btn" id="send-btn" title="Send (Enter)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+          </div>
+          <div class="input-hint">
+            Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ═══ RESIZE HANDLE ═══ -->
+      <div class="resize-handle" id="resize-handle" title="Drag to resize">
+        <div class="resize-handle-grip">
+          <span></span><span></span><span></span>
         </div>
       </div>
 
-    </div>
+      <!-- ═══ RIGHT: PDF Viewer Panel ═══ -->
+      <div class="pdf-panel" id="pdf-panel">
 
-    <!-- Input Bar -->
-    <div class="input-bar">
-      <div class="input-form">
-        <div class="input-wrapper">
-          <textarea
-            id="chat-input"
-            placeholder="Ask anything about your document…"
-            rows="1"
-          ></textarea>
+        <!-- PDF Toolbar -->
+        <div class="pdf-toolbar">
+          <div class="pdf-toolbar-left">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+            </svg>
+            <span class="pdf-toolbar-title" id="pdf-toolbar-title">No PDF loaded</span>
+          </div>
+          <div class="pdf-toolbar-controls">
+            <button class="pdf-ctrl-btn" id="pdf-zoom-out" title="Zoom out">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <span class="pdf-zoom-level" id="pdf-zoom-level">100%</span>
+            <button class="pdf-ctrl-btn" id="pdf-zoom-in" title="Zoom in">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <span class="pdf-toolbar-divider"></span>
+            <button class="pdf-ctrl-btn" id="pdf-prev-page" title="Previous page">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            <span class="pdf-page-info" id="pdf-page-info">— / —</span>
+            <button class="pdf-ctrl-btn" id="pdf-next-page" title="Next page">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+            <span class="pdf-toolbar-divider"></span>
+            <button class="pdf-ctrl-btn pdf-close-btn" id="pdf-close-btn" title="Close PDF panel">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
         </div>
-        <button class="send-btn" id="send-btn" title="Send (Enter)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13"/>
-            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-          </svg>
-        </button>
+
+        <!-- PDF Canvas Container (scrollable) -->
+        <div class="pdf-canvas-container" id="pdf-canvas-container">
+          <div class="pdf-empty-state" id="pdf-empty-state">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--outline)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+            </svg>
+            <p>Upload a PDF to view it here</p>
+            <span>Pages cited by the AI will highlight automatically</span>
+          </div>
+        </div>
+
       </div>
-      <div class="input-hint">
-        Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line
-      </div>
+
     </div>
 
   </main>
@@ -249,6 +326,6 @@
   </div>
 </div>
 
-<script src="script.js?v=20260404b"></script>
+<script src="script.js?v=20260404c" type="module"></script>
 </body>
 </html>

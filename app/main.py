@@ -5,10 +5,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import uuid
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, BackgroundTasks, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -32,6 +33,9 @@ engine = VisionEngine(index_root=INDEX_ROOT, index_name=INDEX_NAME)
 memory = ChatMemory()
 service = VisionService()
 current_pdf_path: Optional[str] = None
+
+# Global state to track background indexing jobs
+job_store: dict[str, dict] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -94,7 +98,7 @@ async def health():
     }
 
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     global current_pdf_path
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files allowed")
@@ -117,26 +121,47 @@ async def upload_pdf(file: UploadFile = File(...)):
     current_pdf_path = str(save_path)
     memory.clear()
 
-    try:
-        engine.rebuild_index(current_pdf_path)
-        page_count = len(engine._pages_info)
-        ocr_count = engine.ocr_page_count
-        visual_count = engine.visual_page_count
-        index_msg = f"Indexed {page_count} pages"
-        if ocr_count > 0:
-            index_msg += f" ({ocr_count} handwritten pages via OCR)"
-        if visual_count > 0:
-            index_msg += f" · {visual_count} pages with visual content analyzed"
-        return {
-            "filename": file.filename,
-            "index_status": index_msg,
-            "status": "success",
-            "ocr_pages": ocr_count,
-            "visual_pages": visual_count,
-        }
-    except Exception as e:
-        logger.error(f"Indexing failed: {e}", exc_info=True)
-        raise HTTPException(500, f"Indexing failed: {e}")
+    # Create a new job ID for tracking
+    job_id = str(uuid.uuid4())
+    job_store[job_id] = {
+        "status": "upload",
+        "progress": 5,
+        "message": "Upload complete. Submitting to queue...",
+        "filename": file.filename,
+    }
+
+    # Define the background worker
+    def _run_indexing(j_id: str, pdf_p: str):
+        def _cb(step_id: str, progress: int, msg: str):
+            if j_id in job_store:
+                job_store[j_id]["status"] = step_id
+                job_store[j_id]["progress"] = progress
+                job_store[j_id]["message"] = msg
+                # If completed with success, save extra metadata
+                if step_id == "completed":
+                    job_store[j_id]["ocr_pages"] = engine.ocr_page_count
+                    job_store[j_id]["visual_pages"] = engine.visual_page_count
+
+        try:
+            engine.rebuild_index(pdf_p, status_callback=_cb)
+        except Exception as e:
+            logger.error(f"Background indexing `{j_id}` failed: {e}")
+
+    # Kick off the background task
+    background_tasks.add_task(_run_indexing, job_id, current_pdf_path)
+
+    # Return immediately
+    return {
+        "job_id": job_id,
+        "filename": file.filename,
+        "message": "Indexing started in background"
+    }
+
+@app.get("/indexing/status/{job_id}")
+async def get_indexing_status(job_id: str):
+    if job_id not in job_store:
+        raise HTTPException(404, "Job ID not found")
+    return job_store[job_id]
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -173,6 +198,66 @@ async def chat(request: ChatRequest):
 async def clear_memory():
     memory.clear()
     return {"message": "Memory cleared"}
+
+# ── Streaming SSE chat endpoint ─────────────────────────────────────────
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    import json as _json
+
+    global current_pdf_path
+    user_msg = request.message.strip()
+
+    routing = route_query(user_msg)
+    needs_rag = routing["needs_rag"]
+
+    retrieved_pages = []
+    if needs_rag and engine.is_ready and current_pdf_path:
+        retrieved_pages = engine.search(user_msg, k=RAG_TOP_K)
+
+    history = memory.get_formatted_history()
+
+    def event_generator():
+        full_text = []
+        for chunk in service.generate_stream(
+            query=user_msg,
+            page_numbers=retrieved_pages,
+            pdf_path=current_pdf_path,
+            chat_history=history,
+            needs_rag=needs_rag,
+            engine=engine,
+        ):
+            full_text.append(chunk)
+            yield f"data: {_json.dumps({'type': 'token', 'content': chunk})}\n\n"
+
+        # Send final metadata event
+        complete_text = "".join(full_text)
+        memory.add(user_msg, complete_text)
+
+        yield f"data: {_json.dumps({'type': 'done', 'needs_rag': needs_rag, 'retrieved_pages': retrieved_pages, 'routing_reason': routing['reason']})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+# ── Serve the currently uploaded PDF ────────────────────────────────────
+@app.get("/pdf/current")
+async def get_current_pdf():
+    if not current_pdf_path:
+        raise HTTPException(404, "No PDF uploaded yet")
+    pdf_file = Path(current_pdf_path)
+    if not pdf_file.exists():
+        raise HTTPException(404, "PDF file not found on disk")
+    return FileResponse(
+        path=str(pdf_file),
+        media_type="application/pdf",
+        filename=pdf_file.name,
+    )
 
 # MUST be last - static files catch-all
 app.mount("/", StaticFiles(directory="frontend", html=True), name="static")

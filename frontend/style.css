@@ -437,8 +437,10 @@ html, body {
   background: rgba(255, 110, 132, 0.06);
 }
 
-/* ── Main Chat Area ─────────────────────────────────────────── */
-.chat-area {
+/* ════════════════════════════════════════════════════════════════
+   MAIN CONTENT — Full height, contains header + split pane
+   ════════════════════════════════════════════════════════════════ */
+.main-content {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -503,6 +505,35 @@ html, body {
   gap: 8px;
 }
 
+/* ── PDF Toggle Button ─────────────────────────────────────── */
+.pdf-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--surface-container-high);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-full);
+  color: var(--on-surface-variant);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.25s;
+  font-family: var(--font-body);
+}
+
+.pdf-toggle-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: rgba(163, 166, 255, 0.08);
+}
+
+.pdf-toggle-btn.active {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: rgba(163, 166, 255, 0.1);
+}
+
 .status-dot {
   width: 7px;
   height: 7px;
@@ -523,6 +554,274 @@ html, body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   SPLIT PANE — Chat + PDF Viewer
+   ════════════════════════════════════════════════════════════════ */
+.split-pane {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ── Chat Panel (Left) ─────────────────────────────────────── */
+.chat-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 350px;
+}
+
+/* ── Resize Handle ─────────────────────────────────────────── */
+.resize-handle {
+  width: 6px;
+  background: var(--surface-container);
+  cursor: col-resize;
+  position: relative;
+  flex-shrink: 0;
+  display: none;
+  z-index: 5;
+  transition: background 0.2s;
+}
+
+.resize-handle:hover,
+.resize-handle.dragging {
+  background: var(--primary-dim);
+}
+
+.resize-handle-grip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.resize-handle-grip span {
+  width: 3px;
+  height: 3px;
+  background: var(--outline);
+  border-radius: 50%;
+  transition: background 0.2s;
+}
+
+.resize-handle:hover .resize-handle-grip span,
+.resize-handle.dragging .resize-handle-grip span {
+  background: white;
+}
+
+/* Show resize handle when PDF panel is visible */
+.split-pane.pdf-visible .resize-handle {
+  display: flex;
+}
+
+/* ── PDF Panel (Right) ─────────────────────────────────────── */
+.pdf-panel {
+  width: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-container-low);
+  overflow: hidden;
+  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              min-width 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.25s ease;
+  opacity: 0;
+  position: relative;
+}
+
+.split-pane.pdf-visible .pdf-panel {
+  width: 40%;
+  min-width: 300px;
+  opacity: 1;
+}
+
+/* Left edge glow */
+.pdf-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 1px;
+  background: linear-gradient(180deg,
+    transparent 0%,
+    rgba(163, 166, 255, 0.12) 30%,
+    rgba(193, 128, 255, 0.12) 70%,
+    transparent 100%
+  );
+  z-index: 2;
+}
+
+/* ── PDF Toolbar ──────────────────────────────────────────── */
+.pdf-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: rgba(24, 25, 30, 0.7);
+  backdrop-filter: blur(12px);
+  flex-shrink: 0;
+  gap: 8px;
+  border-bottom: 1px solid rgba(71, 71, 76, 0.15);
+}
+
+.pdf-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--on-surface-variant);
+  min-width: 0;
+}
+
+.pdf-toolbar-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pdf-toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.pdf-ctrl-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--on-surface-variant);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: var(--font-body);
+}
+
+.pdf-ctrl-btn:hover {
+  background: var(--surface-container-high);
+  border-color: var(--outline-variant);
+  color: var(--on-surface);
+}
+
+.pdf-close-btn:hover {
+  color: var(--danger);
+  border-color: rgba(255, 110, 132, 0.3);
+}
+
+.pdf-zoom-level {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--on-surface-variant);
+  min-width: 36px;
+  text-align: center;
+}
+
+.pdf-page-info {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--on-surface-variant);
+  min-width: 44px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.pdf-toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--outline-variant);
+  margin: 0 4px;
+}
+
+/* ── PDF Canvas Container ────────────────────────────────── */
+.pdf-canvas-container {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  scroll-behavior: smooth;
+}
+
+.pdf-canvas-container::-webkit-scrollbar { width: 5px; }
+.pdf-canvas-container::-webkit-scrollbar-track { background: transparent; }
+.pdf-canvas-container::-webkit-scrollbar-thumb {
+  background: rgba(71, 71, 76, 0.4);
+  border-radius: 3px;
+}
+
+/* Individual page wrapper */
+.pdf-page-wrapper {
+  position: relative;
+  background: white;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  transition: box-shadow 0.3s, outline 0.3s;
+}
+
+.pdf-page-wrapper canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Page number label */
+.pdf-page-label {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  backdrop-filter: blur(8px);
+}
+
+/* Highlighted page (when citation is clicked) */
+.pdf-page-wrapper.highlighted {
+  outline: 2px solid var(--primary);
+  box-shadow: 0 0 30px rgba(163, 166, 255, 0.25), 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+.pdf-page-wrapper.highlighted .pdf-page-label {
+  background: var(--primary-dim);
+}
+
+/* Empty state */
+.pdf-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  text-align: center;
+  gap: 12px;
+  padding: 40px 20px;
+  color: var(--outline);
+}
+
+.pdf-empty-state p {
+  font-size: 14px;
+  color: var(--on-surface-variant);
+}
+
+.pdf-empty-state span {
+  font-size: 12px;
 }
 
 /* ── Messages Window ────────────────────────────────────────── */
@@ -696,6 +995,22 @@ html, body {
   opacity: 0.3;
 }
 
+/* ── Streaming cursor ──────────────────────────────────────── */
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  background: var(--primary);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: cursorBlink 0.8s step-end infinite;
+}
+
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+
 /* Metadata tags below AI bubbles */
 .message-meta {
   display: flex;
@@ -728,6 +1043,26 @@ html, body {
   background: rgba(97, 194, 255, 0.1);
   color: var(--tertiary);
   border: 1px solid rgba(97, 194, 255, 0.15);
+}
+
+/* ── Clickable Page Citations ──────────────────────────────── */
+.meta-tag.page-citation {
+  cursor: pointer;
+  background: rgba(163, 166, 255, 0.08);
+  color: var(--primary);
+  border: 1px solid rgba(163, 166, 255, 0.15);
+  transition: all 0.25s;
+}
+
+.meta-tag.page-citation:hover {
+  background: rgba(163, 166, 255, 0.2);
+  border-color: var(--primary);
+  box-shadow: 0 0 12px rgba(163, 166, 255, 0.2);
+  transform: translateY(-1px);
+}
+
+.meta-tag.page-citation:active {
+  transform: scale(0.95);
 }
 
 /* ── Markdown Content Rendering ─────────────────────────────── */
@@ -1013,6 +1348,19 @@ html, body {
   .input-bar { padding: 14px 16px; }
 
   .welcome-chips { flex-direction: column; align-items: center; }
+
+  /* PDF panel becomes full overlay on mobile */
+  .split-pane.pdf-visible .pdf-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    width: 100%;
+    min-width: 100%;
+  }
+
+  .split-pane.pdf-visible .resize-handle {
+    display: none;
+  }
 }
 
 @media (max-width: 480px) {
