@@ -16,8 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.engine import VisionEngine
 from app.memory import ChatMemory
-from app.router import route_query
-from app.services import VisionService
+from app.services import VisionService, AgenticPlanner
 
 load_dotenv()
 
@@ -32,32 +31,30 @@ RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
 engine = VisionEngine(index_root=INDEX_ROOT, index_name=INDEX_NAME)
 memory = ChatMemory()
 service = VisionService()
-current_pdf_path: Optional[str] = None
+planner = AgenticPlanner()
 
 # Global state to track background indexing jobs
 job_store: dict[str, dict] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global current_pdf_path
     logger.info("=" * 60)
     logger.info("Vision RAG - Phase 1 Ready")
     logger.info("=" * 60)
 
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Load existing PDF + index IN BACKGROUND (non-blocking)
+    # Load existing PDFs + build unified index IN BACKGROUND (non-blocking)
     existing = list(UPLOAD_DIR.glob("*.pdf"))
     if existing:
-        latest = max(existing, key=lambda p: p.stat().st_mtime)
-        current_pdf_path = str(latest)
-        logger.info(f"Found existing PDF: {current_pdf_path}")
+        logger.info(f"Found {len(existing)} existing PDFs. Indexing in background...")
         import threading
         def _bg_index():
-            try:
-                engine.load_or_create_index(current_pdf_path)
-            except Exception as e:
-                logger.warning(f"Background index failed: {e}")
+            for pdf_path in existing:
+                try:
+                    engine.load_or_create_index(str(pdf_path))
+                except Exception as e:
+                    logger.warning(f"Background index failed for {pdf_path.name}: {e}")
         threading.Thread(target=_bg_index, daemon=True).start()
         logger.info("Indexing started in background — server is ready")
 
@@ -99,7 +96,6 @@ async def health():
 
 @app.post("/upload")
 async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    global current_pdf_path
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files allowed")
 
@@ -118,8 +114,7 @@ async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(
         logger.error(f"Failed to save uploaded file: {e}")
         raise HTTPException(500, f"Failed to save file: {e}")
 
-    current_pdf_path = str(save_path)
-    memory.clear()
+    pdf_path_str = str(save_path)
 
     # Create a new job ID for tracking
     job_id = str(uuid.uuid4())
@@ -143,12 +138,15 @@ async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(
                     job_store[j_id]["visual_pages"] = engine.visual_page_count
 
         try:
-            engine.rebuild_index(pdf_p, status_callback=_cb)
+            engine.load_or_create_index(pdf_p, status_callback=_cb)
         except Exception as e:
             logger.error(f"Background indexing `{j_id}` failed: {e}")
+            if j_id in job_store:
+                job_store[j_id]["status"] = "error"
+                job_store[j_id]["message"] = str(e)
 
     # Kick off the background task
-    background_tasks.add_task(_run_indexing, job_id, current_pdf_path)
+    background_tasks.add_task(_run_indexing, job_id, pdf_path_str)
 
     # Return immediately
     return {
@@ -165,21 +163,24 @@ async def get_indexing_status(job_id: str):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    global current_pdf_path
     user_msg = request.message.strip()
-
-    routing = route_query(user_msg)
-    needs_rag = routing["needs_rag"]
-
-    retrieved_pages = []
-    if needs_rag and engine.is_ready and current_pdf_path:
-        retrieved_pages = engine.search(user_msg, k=RAG_TOP_K)
-
     history = memory.get_formatted_history()
+
+    # 1. Agentic planning
+    plan = planner.analyze_query(user_msg, history)
+    needs_rag = plan["needs_rag"]
+    queries = plan["search_queries"]
+    prioritize_visuals = plan["prioritize_visuals"]
+
+    # 2. Retrieval
+    retrieved_pages = []
+    if needs_rag and engine.is_ready:
+        retrieved_pages = engine.search(queries, k_total=5, prioritize_visuals=prioritize_visuals)
+
+    # 3. Generation
     answer = service.generate(
         query=user_msg,
         page_numbers=retrieved_pages,
-        pdf_path=current_pdf_path,
         chat_history=history,
         needs_rag=needs_rag,
         engine=engine,
@@ -190,8 +191,8 @@ async def chat(request: ChatRequest):
     return ChatResponse(
         response=answer,
         needs_rag=needs_rag,
-        retrieved_pages=retrieved_pages,
-        routing_reason=routing["reason"]
+        retrieved_pages=retrieved_pages, # will be list of dicts: {"filename": ..., "page_num": ...}
+        routing_reason=f"Queries: {queries} (visuals: {prioritize_visuals})"
     )
 
 @app.delete("/memory")
@@ -204,24 +205,25 @@ async def clear_memory():
 async def chat_stream(request: ChatRequest):
     import json as _json
 
-    global current_pdf_path
     user_msg = request.message.strip()
-
-    routing = route_query(user_msg)
-    needs_rag = routing["needs_rag"]
-
-    retrieved_pages = []
-    if needs_rag and engine.is_ready and current_pdf_path:
-        retrieved_pages = engine.search(user_msg, k=RAG_TOP_K)
-
     history = memory.get_formatted_history()
+
+    # 1. Agentic planning
+    plan = planner.analyze_query(user_msg, history)
+    needs_rag = plan["needs_rag"]
+    queries = plan["search_queries"]
+    prioritize_visuals = plan["prioritize_visuals"]
+
+    # 2. Retrieval
+    retrieved_pages = []
+    if needs_rag and engine.is_ready:
+        retrieved_pages = engine.search(queries, k_total=5, prioritize_visuals=prioritize_visuals)
 
     def event_generator():
         full_text = []
         for chunk in service.generate_stream(
             query=user_msg,
             page_numbers=retrieved_pages,
-            pdf_path=current_pdf_path,
             chat_history=history,
             needs_rag=needs_rag,
             engine=engine,
@@ -233,7 +235,7 @@ async def chat_stream(request: ChatRequest):
         complete_text = "".join(full_text)
         memory.add(user_msg, complete_text)
 
-        yield f"data: {_json.dumps({'type': 'done', 'needs_rag': needs_rag, 'retrieved_pages': retrieved_pages, 'routing_reason': routing['reason']})}\n\n"
+        yield f"data: {_json.dumps({'type': 'done', 'needs_rag': needs_rag, 'retrieved_pages': retrieved_pages, 'routing_reason': str(queries)})}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -245,12 +247,22 @@ async def chat_stream(request: ChatRequest):
         },
     )
 
+@app.get("/documents")
+async def get_documents():
+    return {"documents": engine.get_document_list(), "index_ready": engine.is_ready}
+
+@app.delete("/documents/{filename}")
+async def delete_document(filename: str):
+    engine.remove_document(filename)
+    pdf_file = UPLOAD_DIR / filename
+    if pdf_file.exists():
+        pdf_file.unlink()
+    return {"message": f"Deleted {filename} from index and disk"}
+
 # ── Serve the currently uploaded PDF ────────────────────────────────────
-@app.get("/pdf/current")
-async def get_current_pdf():
-    if not current_pdf_path:
-        raise HTTPException(404, "No PDF uploaded yet")
-    pdf_file = Path(current_pdf_path)
+@app.get("/pdf/{filename}")
+async def get_pdf(filename: str):
+    pdf_file = UPLOAD_DIR / filename
     if not pdf_file.exists():
         raise HTTPException(404, "PDF file not found on disk")
     return FileResponse(

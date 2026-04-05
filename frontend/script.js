@@ -54,9 +54,6 @@ const fileInput        = document.getElementById('pdf-file-input');
 const uploadStatus     = document.getElementById('upload-status');
 const uploadBarFill    = document.getElementById('upload-bar-fill');
 const uploadStatusText = document.getElementById('upload-status-text');
-const docCard          = document.getElementById('doc-card');
-const docCardName      = document.getElementById('doc-card-name');
-const docCardMeta      = document.getElementById('doc-card-meta');
 const headerMeta       = document.getElementById('header-meta');
 const statusDot        = document.getElementById('status-dot');
 const sidebarToggle    = document.getElementById('sidebar-toggle');
@@ -131,7 +128,9 @@ function hideWelcome() {
 
 function formatPages(pages) {
   if (!pages || pages.length === 0) return 'no pages';
-  return 'pages ' + pages.join(', ');
+  // Check if it's the new object format
+  const mapped = pages.map(p => typeof p === 'object' ? `${p.filename} (p.${p.page_num})` : p);
+  return 'pages ' + mapped.join(', ');
 }
 
 function setInputEnabled(enabled) {
@@ -261,14 +260,20 @@ function createStreamingMessage() {
 
       // Add clickable page citation badges
       if (pages && pages.length > 0) {
-        pages.forEach(pageNum => {
+        pages.forEach(p => {
+          const fname = typeof p === 'object' ? p.filename : currentDocumentName;
+          const pnum = typeof p === 'object' ? p.page_num : p;
           const citationTag = document.createElement('span');
           citationTag.className = 'meta-tag page-citation';
-          citationTag.textContent = `📑 Page ${pageNum}`;
-          citationTag.title = `View page ${pageNum} in PDF viewer`;
+          citationTag.textContent = `📑 ${fname} p.${pnum}`;
+          citationTag.title = `View page ${pnum} of ${fname} in PDF viewer`;
           citationTag.addEventListener('click', () => {
             showPdfPanel();
-            scrollPdfToPage(pageNum);
+            if (currentDocumentName !== fname) {
+              loadPdfInViewer(fname).then(() => scrollPdfToPage(pnum));
+            } else {
+              scrollPdfToPage(pnum);
+            }
           });
           metaDiv.appendChild(citationTag);
         });
@@ -301,9 +306,11 @@ function appendAiMessage(markdown, needsRag, pages, reason) {
 
   let citationTags = '';
   if (pages && pages.length > 0) {
-    citationTags = pages.map(p =>
-      `<span class="meta-tag page-citation" data-page="${p}" title="View page ${p} in PDF viewer">📑 Page ${p}</span>`
-    ).join('');
+    citationTags = pages.map(p => {
+      const fname = typeof p === 'object' ? p.filename : currentDocumentName;
+      const pnum = typeof p === 'object' ? p.page_num : p;
+      return `<span class="meta-tag page-citation" data-filename="${fname}" data-page="${pnum}" title="View page ${pnum} of ${fname} in PDF viewer">📑 ${fname} p.${pnum}</span>`;
+    }).join('');
   }
 
   wrapper.innerHTML = `
@@ -328,9 +335,14 @@ function appendAiMessage(markdown, needsRag, pages, reason) {
   // Bind click handlers on citation tags
   wrapper.querySelectorAll('.page-citation').forEach(tag => {
     tag.addEventListener('click', () => {
-      const pageNum = parseInt(tag.dataset.page, 10);
+      const pnum = parseInt(tag.dataset.page, 10);
+      const fname = tag.dataset.filename;
       showPdfPanel();
-      scrollPdfToPage(pageNum);
+      if (currentDocumentName !== fname) {
+        loadPdfInViewer(fname).then(() => scrollPdfToPage(pnum));
+      } else {
+        scrollPdfToPage(pnum);
+      }
     });
   });
 
@@ -515,7 +527,6 @@ async function uploadPdf(file) {
 
   // Show full-screen overlay
   showOverlay(file.name);
-  docCard.classList.remove('visible');
 
   const formData = new FormData();
   formData.append('file', file);
@@ -568,11 +579,7 @@ async function uploadPdf(file) {
           uploadStatus.style.display = 'flex';
           const indexMsg = statusData.message; // already constructed in backend "Indexed X pages..."
           setUploadStatus(`✓ ${indexMsg}`, 100, 'success');
-          currentDocumentName = data.filename;
-          docCardName.textContent = data.filename;
-          docCardMeta.textContent = indexMsg;
-          docCard.classList.add('visible');
-          headerMeta.textContent = `${data.filename}${ocrInfo}${visualInfo}`;
+          headerMeta.textContent = `Processing completed.`;
           setStatusActive(true);
 
           messagesWindow.innerHTML = '';
@@ -580,8 +587,8 @@ async function uploadPdf(file) {
 
           console.info(`[VisionRAG] Uploaded & indexed: ${data.filename} (OCR pages: ${ocrPages})`);
 
-          // Load PDF into viewer
-          await loadPdfInViewer();
+          // Refresh document list
+          fetchDocuments();
 
           // Auto-show PDF panel after upload
           showPdfPanel();
@@ -698,21 +705,117 @@ function renderWelcomeBack(filename, ocrPages = 0, visualPages = 0) {
 }
 
 // ---------------------------------------------------------------------------
+// Document Management
+// ---------------------------------------------------------------------------
+
+async function fetchDocuments() {
+  try {
+    const res = await fetch(`${BASE_URL}/documents`);
+    if (!res.ok) return;
+    const data = await res.json();
+    renderDocumentList(data.documents);
+    if (data.index_ready && data.documents.length > 0) {
+      setStatusActive(true);
+      headerMeta.textContent = `${data.documents.length} document(s) in index`;
+      
+      // If we don't have a document loaded but there are documents, load the first one
+      if (!currentDocumentName && data.documents.length > 0) {
+        loadPdfInViewer(data.documents[0]);
+      }
+    } else {
+      headerMeta.textContent = 'Agent ready';
+    }
+  } catch (err) {
+    console.error('[VisionRAG] Failed to fetch documents', err);
+  }
+}
+
+window.deleteDocument = async function(filename) {
+  try {
+    const res = await fetch(`${BASE_URL}/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    if (res.ok) {
+      if (currentDocumentName === filename) {
+        currentDocumentName = '';
+        pdfCanvasContainer.innerHTML = '';
+        pdfToolbarTitle.textContent = 'Multi-Document RAG';
+        pdfPageInfo.textContent = '—';
+      }
+      fetchDocuments();
+    }
+  } catch (e) {
+    console.error('[VisionRAG] Failed to delete', e);
+  }
+}
+
+function renderDocumentList(documents) {
+  const container = document.getElementById('document-list-container');
+  if (!container) return;
+  container.innerHTML = '';
+  
+  if (documents.length === 0) {
+    container.innerHTML = `
+      <div style="padding:16px;text-align:center;opacity:0.6;font-size:13px;">
+        No documents uploaded.
+      </div>`;
+    return;
+  }
+  
+  documents.forEach(docName => {
+    const card = document.createElement('div');
+    card.className = 'doc-card visible';
+    
+    // Check if it's the currently viewed one
+    if (docName === currentDocumentName) {
+      card.style.borderColor = 'var(--primary)';
+      card.style.background = 'rgba(255, 110, 132, 0.05)';
+    }
+
+    card.innerHTML = `
+      <div class="doc-card-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>
+      </div>
+      <div class="doc-card-info" style="cursor: pointer" onclick="loadPdfInViewer('${escapeHtml(docName)}')">
+        <div class="doc-card-name" style="word-break: break-all;">${escapeHtml(docName)}</div>
+        <div class="doc-card-meta">Indexed</div>
+      </div>
+      <div style="margin-left: auto; cursor:pointer; padding:6px; background:rgba(255,50,50,0.1); border-radius:6px;" onclick="deleteDocument('${escapeHtml(docName)}')">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+// Ensure loadPdfInViewer is global for onclick handlers
+window.loadPdfInViewer = loadPdfInViewer;
+
+// ---------------------------------------------------------------------------
 // PDF Viewer Logic
 // ---------------------------------------------------------------------------
 
-async function loadPdfInViewer() {
+async function loadPdfInViewer(filename) {
+  if (!filename) return;
   try {
-    pdfDoc = await pdfjsLib.getDocument(`${BASE_URL}/pdf/current`).promise;
+    currentDocumentName = filename;
+    pdfDoc = await pdfjsLib.getDocument(`${BASE_URL}/pdf/${encodeURIComponent(filename)}`).promise;
     pdfTotalPages = pdfDoc.numPages;
     pdfCurrentPage = 1;
+    
+    // Re-render list to highlight current
+    fetchDocuments();
 
-    pdfToolbarTitle.textContent = currentDocumentName || 'Document';
+    pdfToolbarTitle.textContent = currentDocumentName;
     updatePdfPageInfo();
 
     // Clear previous renders
     pdfCanvasContainer.innerHTML = '';
     pdfRenderedPages.clear();
+    const pdfEmptyState = document.getElementById('pdf-empty-state');
     if (pdfEmptyState) pdfEmptyState.remove();
 
     // Render all pages
@@ -737,6 +840,11 @@ async function renderPdfPage(pageNum) {
     wrapper.id = `pdf-page-${pageNum}`;
     wrapper.dataset.page = pageNum;
 
+    // Force aspect ratio on wrapper to match PDF page, and responsive width
+    wrapper.style.aspectRatio = `${viewport.width} / ${viewport.height}`;
+    wrapper.style.width = '100%';
+    wrapper.style.maxWidth = viewport.width + 'px';
+
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
 
@@ -744,8 +852,6 @@ async function renderPdfPage(pageNum) {
     const dpr = window.devicePixelRatio || 1;
     canvas.width = viewport.width * dpr;
     canvas.height = viewport.height * dpr;
-    canvas.style.width = viewport.width + 'px';
-    canvas.style.height = viewport.height + 'px';
     ctx.scale(dpr, dpr);
 
     const label = document.createElement('div');
@@ -1049,25 +1155,9 @@ pdfCanvasContainer.addEventListener('scroll', () => {
 
 async function init() {
   try {
-    const res = await fetch(`${BASE_URL}/health`);
-    if (!res.ok) return;
-    const data = await res.json();
-    if (data.index_ready && data.current_pdf) {
-      const name = data.current_pdf.split(/[/\\]/).pop();
-      currentDocumentName = name;
-      docCardName.textContent = name;
-      docCardMeta.textContent = `Already indexed · ${data.conversation_turns} turns in memory`;
-      docCard.classList.add('visible');
-      headerMeta.textContent = name;
-      setStatusActive(true);
-      uploadStatus.style.display = 'flex';
-      setUploadStatus('✓ Existing index loaded from disk', 100, 'success');
-
-      // Load PDF into viewer in background
-      loadPdfInViewer();
-    }
+    fetchDocuments();
   } catch {
-    console.warn('[VisionRAG] Backend not reachable on init. Start the server.');
+    console.warn('[VisionRAG] Init error.');
   }
 }
 

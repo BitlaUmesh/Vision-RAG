@@ -41,17 +41,16 @@ class VisionService:
     def generate(
         self,
         query: str,
-        page_numbers: List[int],
-        pdf_path: Optional[str],
+        page_numbers: List[Dict],
         chat_history: str,
         needs_rag: bool = True,
         engine=None,
     ) -> str:
-        context_text = self._extract_context(page_numbers, pdf_path, engine)
+        context_text = self._extract_context(page_numbers, engine)
         system_prompt = self._build_system_prompt(context_text, chat_history, needs_rag)
 
         # Get page images for multimodal vision call
-        page_images: Dict[int, str] = {}
+        page_images: Dict[str, str] = {}
         if needs_rag and engine and page_numbers:
             page_images = engine.get_page_images(page_numbers)
 
@@ -63,35 +62,19 @@ class VisionService:
     # ── context extraction ────────────────────────────────────────────────
 
     @staticmethod
-    def _extract_context(page_numbers, pdf_path, engine=None):
-        if not page_numbers or not pdf_path:
+    def _extract_context(page_numbers: List[Dict], engine=None):
+        if not page_numbers or not engine:
             return ""
         parts = []
-        if engine:
-            for p in page_numbers:
-                info = engine.get_page_info(p)
-                if info:
-                    part = f"\n--- Page {p} ---\n{info['text']}\n"
-                    if info.get("visual_description"):
-                        part += f"\n[VISUAL CONTENT on Page {p}]\n{info['visual_description']}\n"
-                    parts.append(part)
-            if parts:
-                return "".join(parts)
-
-        doc = None
-        try:
-            import pymupdf as fitz
-            doc = fitz.open(pdf_path)
-            for p in page_numbers:
-                if 1 <= p <= len(doc):
-                    page = doc[p - 1]
-                    text = extract_text_hybrid(page)
-                    parts.append(f"\n--- Page {p} ---\n{text}\n")
-        except Exception as e:
-            logger.error(f"PDF extraction error: {e}")
-        finally:
-            if doc:
-                doc.close()
+        for p in page_numbers:
+            fname = p["filename"]
+            pnum = p["page_num"]
+            info = engine.get_page_info(fname, pnum)
+            if info:
+                part = f"\n--- {fname} (Page {pnum}) ---\n{info['text']}\n"
+                if info.get("visual_description"):
+                    part += f"\n[VISUAL CONTENT on {fname} Page {pnum}]\n{info['visual_description']}\n"
+                parts.append(part)
         return "".join(parts)
 
     # ── prompt builder ────────────────────────────────────────────────────
@@ -183,17 +166,17 @@ class VisionService:
 
     # ── Multimodal vision call ────────────────────────────────────────────
 
-    def _call_vision(self, system_prompt: str, user_message: str, page_images: Dict[int, str]) -> str:
+    def _call_vision(self, system_prompt: str, user_message: str, page_images: Dict[str, str]) -> str:
         last_err = None
 
         # Build multimodal content
         user_content = [{"type": "text", "text": user_message}]
         sorted_pages = sorted(page_images.keys())[:4]
-        for page_num in sorted_pages:
-            user_content.append({"type": "text", "text": f"\n[Page {page_num} image:]"})
+        for page_id in sorted_pages:
+            user_content.append({"type": "text", "text": f"\n[Page {page_id} image:]"})
             user_content.append({
                 "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{page_images[page_num]}"},
+                "image_url": {"url": f"data:image/jpeg;base64,{page_images[page_id]}"},
             })
 
         logger.info(f"→ VISION with {len(sorted_pages)} pages: {sorted_pages}")
@@ -256,17 +239,16 @@ class VisionService:
     def generate_stream(
         self,
         query: str,
-        page_numbers: List[int],
-        pdf_path: Optional[str],
+        page_numbers: List[Dict],
         chat_history: str,
         needs_rag: bool = True,
         engine=None,
     ):
         """Generator that yields text chunks as they arrive from Groq API."""
-        context_text = self._extract_context(page_numbers, pdf_path, engine)
+        context_text = self._extract_context(page_numbers, engine)
         system_prompt = self._build_system_prompt(context_text, chat_history, needs_rag)
 
-        page_images: Dict[int, str] = {}
+        page_images: Dict[str, str] = {}
         if needs_rag and engine and page_numbers:
             page_images = engine.get_page_images(page_numbers)
 
@@ -331,17 +313,17 @@ class VisionService:
 
     # ── Streaming vision call ─────────────────────────────────────────────
 
-    def _call_vision_stream(self, system_prompt: str, user_message: str, page_images: Dict[int, str]):
+    def _call_vision_stream(self, system_prompt: str, user_message: str, page_images: Dict[str, str]):
         """Generator: yields text chunks from Groq vision model with streaming."""
         last_err = None
 
         user_content = [{"type": "text", "text": user_message}]
         sorted_pages = sorted(page_images.keys())[:4]
-        for page_num in sorted_pages:
-            user_content.append({"type": "text", "text": f"\n[Page {page_num} image:]"})
+        for page_id in sorted_pages:
+            user_content.append({"type": "text", "text": f"\n[Page {page_id} image:]"})
             user_content.append({
                 "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{page_images[page_num]}"},
+                "image_url": {"url": f"data:image/jpeg;base64,{page_images[page_id]}"},
             })
 
         logger.info(f"→ VISION STREAM with {len(sorted_pages)} pages: {sorted_pages}")
@@ -429,3 +411,63 @@ class VisionService:
                             yield content
                 except json.JSONDecodeError:
                     continue
+
+class AgenticPlanner:
+    """Agent that intercepts user query and outputs JSON search plan."""
+
+    API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+    def __init__(self):
+        import os
+        self.api_key = os.getenv("GROQ_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("GROQ_API_KEY not set in .env")
+        self.model = "llama-3.1-8b-instant"
+
+    def analyze_query(self, query: str, history: str) -> dict:
+        prompt = (
+            "You are a sophisticated JSON query planner for a multi-document research assistant.\n"
+            "Given the user's query and conversation history, you must output ONLY valid JSON.\n\n"
+            "Decision logic:\n"
+            '1. "needs_rag" (boolean): True if the query asks for factual info, comparisons, document contents, visual elements, logic, answers, etc. False ONLY for purely casual greetings (like "hi" or "who are you").\n\n'
+            '2. "search_queries" (list of strings): If needs_rag is True, decompose the user\'s complex question into 1 to 3 optimized, highly specific keyword search queries. If the query asks to compare two things, create one query for each thing. Put the most important keywords first. If needs_rag is False, return [].\n\n'
+            '3. "prioritize_visuals" (boolean): True if the user specifically asks for diagrams, images, tables, figures, charts, or visual architecture. False otherwise.\n\n'
+            "User Query: " + query + "\n"
+        )
+        if history and history != "No previous conversation.":
+            prompt += f"\nRecent History:\n{history}"
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1,
+            "max_tokens": 512,
+        }
+
+        try:
+            import json
+            logger.info(f"→ AGENTIC PLANNER ({self.model}) analyzing query...")
+            resp = http_requests.post(self.API_URL, headers=headers, json=payload, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            result = json.loads(content)
+            
+            # Ensure defaults
+            return {
+                "needs_rag": bool(result.get("needs_rag", True)),
+                "search_queries": result.get("search_queries", [query])[:3],
+                "prioritize_visuals": bool(result.get("prioritize_visuals", False))
+            }
+        except Exception as e:
+            logger.warning(f"Agentic Planner failed: {e}. Falling back to default routing.")
+            return {
+                "needs_rag": True,
+                "search_queries": [query],
+                "prioritize_visuals": False
+            }
