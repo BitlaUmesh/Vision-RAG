@@ -1,7 +1,8 @@
-rag_venv/
+venv/
 __pycache__/
 *.pyc
 .env
 data/
 .byaldi/
 .DS_Store
+venv/
