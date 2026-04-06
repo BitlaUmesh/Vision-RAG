@@ -101,7 +101,8 @@ export default function PdfViewer({ currentPdf }: { currentPdf: string | null })
     );
   }
 
-  const pdfUrl = `http://127.0.0.1:8000/pdf/${currentPdf}`;
+  const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+  const pdfUrl = `${API}/pdf/${currentPdf}`;
 
   return (
     <div className="h-full flex flex-col relative" ref={containerRef}>
