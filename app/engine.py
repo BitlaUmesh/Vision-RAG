@@ -28,8 +28,8 @@ _embedding_model = None
 _embedding_lock = threading.Lock()
 
 CHROMA_DIR = os.getenv("CHROMA_DIR", "./chromadb_data")
-COLLECTION_NAME = "vision_rag_chunks"
-EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"  # 420MB, high quality
+COLLECTION_NAME = "vision_rag_chunks_minilm"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # ~90MB, fits in Render free tier RAM
 
 
 def _get_embedding_model():
@@ -229,7 +229,7 @@ class VisionEngine:
             embeddings = model.encode(
                 texts_to_embed,
                 show_progress_bar=False,
-                batch_size=32,
+                batch_size=8,
                 normalize_embeddings=True,
             ).tolist()
 
