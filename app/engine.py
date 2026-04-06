@@ -1,91 +1,158 @@
+"""
+engine.py — ChromaDB-powered semantic search engine (Phase 2).
+================================================================================
+Replaces the BM25 keyword-matching engine with:
+  - ChromaDB for persistent vector storage
+  - sentence-transformers (all-mpnet-base-v2) for high-quality embeddings
+  - Intelligent overlapping text chunking via app.chunking
+"""
+
 import logging
+import os
 import time
 import threading
+import uuid
 from typing import Callable, Dict, List, Optional
-from collections import defaultdict
 
 import pymupdf as fitz
-from rank_bm25 import BM25Okapi
 
 from app.ocr import extract_text_hybrid, extract_visual_description, page_to_base64
+from app.chunking import chunk_page
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Lazy-loaded globals (heavy imports deferred to first use)
+# ---------------------------------------------------------------------------
+_embedding_model = None
+_embedding_lock = threading.Lock()
+
+CHROMA_DIR = os.getenv("CHROMA_DIR", "./chromadb_data")
+COLLECTION_NAME = "vision_rag_chunks"
+EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"  # 420MB, high quality
+
+
+def _get_embedding_model():
+    """Lazy-load the sentence-transformers model (one-time ~420MB download)."""
+    global _embedding_model
+    if _embedding_model is None:
+        with _embedding_lock:
+            if _embedding_model is None:
+                logger.info(f"Loading embedding model: {EMBEDDING_MODEL_NAME}...")
+                from sentence_transformers import SentenceTransformer
+                _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+                logger.info("Embedding model loaded.")
+    return _embedding_model
+
 
 class VisionEngine:
-    """Core RAG engine managing BM25 search over extracted text and metadata across multiple PDFs."""
+    """Core RAG engine with ChromaDB vector search + local embeddings."""
 
-    def __init__(self, index_root: str = ".byaldi", index_name: str = "vision_rag_index"):
-        # State across all documents
-        self._bm25 = None
-        self._pages_info: List[Dict] = []
-        self._tokenized_corpus: List[List[str]] = []
-        self._index_ready = False
-        
-        self._ocr_pages: List[str] = []     # e.g. "filename.pdf_1"
-        self._visual_pages: List[str] = []  # e.g. "filename.pdf_1"
-        self._page_images: Dict[str, str] = {}  # "filename.pdf_1" -> base64
-        
-        import uuid
+    def __init__(self):
+        import chromadb
+
+        self._client = chromadb.PersistentClient(path=CHROMA_DIR)
+        self._collection = self._client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+        # In-memory image cache (not persisted — rebuilt on demand)
+        self._page_images: Dict[str, str] = {}
+
+        # Track indexed documents (derive from ChromaDB metadata)
+        self._indexed_filenames: set = set()
+        self._refresh_document_list()
+
+        # Threading
         self._current_run_id = str(uuid.uuid4())
         self._lock = threading.Lock()
+        self._index_ready = self._collection.count() > 0
+
+        logger.info(
+            f"VisionEngine initialized. ChromaDB at '{CHROMA_DIR}', "
+            f"{self._collection.count()} existing chunks, "
+            f"{len(self._indexed_filenames)} documents."
+        )
+
+    # ── Document management ────────────────────────────────────────────────
+
+    def _refresh_document_list(self):
+        """Derive the list of indexed filenames from ChromaDB metadata."""
+        try:
+            if self._collection.count() == 0:
+                self._indexed_filenames = set()
+                return
+            # Peek at all documents' metadata to extract filenames
+            # ChromaDB .get() with no IDs returns all
+            results = self._collection.get(
+                include=["metadatas"],
+                limit=self._collection.count(),
+            )
+            filenames = set()
+            if results and results["metadatas"]:
+                for meta in results["metadatas"]:
+                    if meta and "filename" in meta:
+                        filenames.add(meta["filename"])
+            self._indexed_filenames = filenames
+        except Exception as e:
+            logger.warning(f"Failed to refresh document list: {e}")
+            self._indexed_filenames = set()
 
     def get_document_list(self) -> List[str]:
         with self._lock:
-            # Extract unique filenames from current index
-            filenames = set(info["filename"] for info in self._pages_info)
-            return list(filenames)
+            return list(self._indexed_filenames)
 
     def remove_document(self, filename: str):
         with self._lock:
-            logger.info(f"Removing document {filename} from index...")
-            
-            # Find indices to keep
-            keep_indices = [i for i, info in enumerate(self._pages_info) if info["filename"] != filename]
-            
-            if len(keep_indices) == len(self._pages_info):
-                logger.warning(f"Document {filename} not found in index.")
-                return
+            logger.info(f"Removing document {filename} from ChromaDB...")
 
-            self._pages_info = [self._pages_info[i] for i in keep_indices]
-            self._tokenized_corpus = [self._tokenized_corpus[i] for i in keep_indices]
-            
-            # Filter other lists/dicts
+            # Delete all chunks belonging to this file
+            try:
+                self._collection.delete(
+                    where={"filename": filename}
+                )
+            except Exception as e:
+                logger.warning(f"ChromaDB delete failed: {e}")
+
+            # Clean image cache
             prefix = f"{filename}_"
-            self._ocr_pages = [p for p in self._ocr_pages if not p.startswith(prefix)]
-            self._visual_pages = [p for p in self._visual_pages if not p.startswith(prefix)]
-            self._page_images = {k: v for k, v in self._page_images.items() if not k.startswith(prefix)}
-            
-            if self._tokenized_corpus:
-                self._bm25 = BM25Okapi(self._tokenized_corpus)
-                self._index_ready = True
-            else:
-                self._bm25 = None
-                self._index_ready = False
-            
-            logger.info(f"Document {filename} removed. {len(self._pages_info)} total pages remaining.")
+            self._page_images = {
+                k: v for k, v in self._page_images.items()
+                if not k.startswith(prefix)
+            }
 
-    def load_or_create_index(self, pdf_path: str, status_callback: Optional[Callable[[str, int, str], None]] = None):
-        import uuid
-        import os
+            self._indexed_filenames.discard(filename)
+            self._index_ready = self._collection.count() > 0
+
+            logger.info(
+                f"Document {filename} removed. "
+                f"{self._collection.count()} chunks remaining."
+            )
+
+    # ── Indexing ───────────────────────────────────────────────────────────
+
+    def load_or_create_index(
+        self,
+        pdf_path: str,
+        status_callback: Optional[Callable[[str, int, str], None]] = None,
+    ):
         run_id = str(uuid.uuid4())
         self._current_run_id = run_id
-        
         filename = os.path.basename(pdf_path)
 
         def _report(step_id: str, progress: int, msg: str):
             if status_callback:
                 status_callback(step_id, progress, msg)
 
-        # Build into LOCAL variables initially — so we don't hold the lock during expensive processing
-        logger.info(f"Extracting text and analyzing visuals from {pdf_path}")
+        logger.info(f"Starting indexing pipeline for {filename}")
         _report("upload", 15, "Starting extraction...")
-        
-        local_pages_info = []
-        local_ocr_pages = []
-        local_visual_pages = []
-        local_page_images = {}
-        local_tokenized_corpus = []
+
+        # Accumulate locally before committing to ChromaDB
+        all_chunk_records: List[Dict] = []
+        local_page_images: Dict[str, str] = {}
+        local_ocr_pages: List[str] = []
+        local_visual_pages: List[str] = []
 
         doc = None
         try:
@@ -94,114 +161,114 @@ class VisionEngine:
                 raise ValueError(f"PDF has 0 pages: {pdf_path}")
 
             total = len(doc)
+
             for i, page in enumerate(doc):
                 page_num = i + 1
                 page_id = f"{filename}_{page_num}"
 
-                # Check for race conditions before processing page
+                # Abort check
                 if self._current_run_id != run_id:
-                    logger.warning(f"Indexing aborted for {filename}: run cancelled.")
+                    logger.warning(f"Indexing aborted for {filename}")
                     _report("error", 0, "Indexing aborted by a newer action.")
                     return
 
                 logger.info(f"Processing {filename} page {page_num}/{total}...")
-                base_progress = 15 + int((i / total) * 65)  # 15% to 80%
-                
+                base_progress = 15 + int((i / total) * 50)  # 15% → 65%
                 _report("text", base_progress, f"Extracting text (Page {page_num}/{total})...")
 
-                # Pace API calls to avoid rate limits
+                # Rate-limit API calls
                 if i > 0:
                     time.sleep(3)
 
-                # --- Step 1: Text extraction (hybrid: embedded + OCR fallback) ---
+                # --- Text extraction ---
                 embedded = page.get_text() or ""
                 text = extract_text_hybrid(page)
 
-                # Track if OCR was used
                 if len(embedded.strip()) < 50 and len(text.strip()) > len(embedded.strip()):
                     local_ocr_pages.append(page_id)
 
-                # --- Step 2: Visual content analysis ---
-                _report("visual", base_progress + int(32 / total), f"Analyzing visuals (Page {page_num}/{total})...")
+                # --- Visual content analysis ---
+                _report("visual", base_progress + int(25 / total),
+                        f"Analyzing visuals (Page {page_num}/{total})...")
                 visual_desc = None
                 try:
                     visual_desc = extract_visual_description(page)
                     if visual_desc:
                         local_visual_pages.append(page_id)
-                        logger.info(f"Page {page_num}: visual content analyzed "
-                                    f"({len(visual_desc)} chars)")
                 except Exception as e:
                     logger.warning(f"Page {page_num}: visual analysis failed: {e}")
 
-                # --- Step 3: Store page image for query-time multimodal calls ---
+                # --- Store page image ---
                 try:
-                    img_b64 = page_to_base64(page, dpi=150)  # lower DPI for storage
+                    img_b64 = page_to_base64(page, dpi=150)
                     local_page_images[page_id] = img_b64
                 except Exception as e:
                     logger.warning(f"Page {page_num}: failed to store image: {e}")
 
-                # --- Step 4: Store page info ---
-                local_pages_info.append({
-                    "filename": filename,
-                    "page_num": page_num,
-                    "text": text,
-                    "visual_description": visual_desc or "",
-                })
+                # --- Chunk the page ---
+                page_chunks = chunk_page(
+                    page_text=text,
+                    visual_description=visual_desc,
+                    filename=filename,
+                    page_num=page_num,
+                )
+                all_chunk_records.extend(page_chunks)
 
-                # --- Step 5: Build combined corpus for BM25 ---
-                # Include the filename so queries referencing the document name match
-                combined = f"Filename: {filename}\n{text}"
-                if visual_desc:
-                    combined += "\n\n[VISUAL CONTENT]\n" + visual_desc
-
-                # Replace underscores and hyphens to ensure filename tokenization (e.g. Umesh_Resume -> umesh resume)
-                import re
-                clean_combined = re.sub(r'[_\-]', ' ', combined)
-                tokens = clean_combined.lower().split()
-                if tokens:
-                    local_tokenized_corpus.append(tokens)
-                else:
-                    local_tokenized_corpus.append([""])  # keep alignment with page index
-
-            # Check one more time before mutating global state
+            # --- Generate embeddings ---
             if self._current_run_id != run_id:
-                logger.warning(f"Indexing aborted at commit for {filename}: run cancelled.")
                 _report("error", 0, "Indexing aborted by a newer action.")
                 return
 
-            _report("index", 85, "Merging into global search index...")
-            
-            # --- ATOMIC MERGE ---
+            _report("index", 70, f"Generating embeddings for {len(all_chunk_records)} chunks...")
+
+            model = _get_embedding_model()
+            texts_to_embed = [r["text"] for r in all_chunk_records]
+
+            # Batch embed all chunks at once
+            logger.info(f"Embedding {len(texts_to_embed)} chunks...")
+            embeddings = model.encode(
+                texts_to_embed,
+                show_progress_bar=False,
+                batch_size=32,
+                normalize_embeddings=True,
+            ).tolist()
+
+            _report("index", 85, "Storing in vector database...")
+
+            # --- Commit to ChromaDB ---
             with self._lock:
-                # Remove any existing pages for this filename (in case they uploaded it again)
-                # This ensures we don't duplicate indexing if they re-upload the same file
-                keep_indices = [i for i, info in enumerate(self._pages_info) if info["filename"] != filename]
-                self._pages_info = [self._pages_info[i] for i in keep_indices] + local_pages_info
-                self._tokenized_corpus = [self._tokenized_corpus[i] for i in keep_indices] + local_tokenized_corpus
-                
-                prefix = f"{filename}_"
-                self._ocr_pages = [p for p in self._ocr_pages if not p.startswith(prefix)] + local_ocr_pages
-                self._visual_pages = [p for p in self._visual_pages if not p.startswith(prefix)] + local_visual_pages
-                
-                # Update images directly
+                # Remove existing chunks for this filename (re-upload case)
+                try:
+                    self._collection.delete(where={"filename": filename})
+                except Exception:
+                    pass  # No existing entries — fine
+
+                # Upsert in batches (ChromaDB has a batch limit)
+                batch_size = 100
+                for batch_start in range(0, len(all_chunk_records), batch_size):
+                    batch_end = min(batch_start + batch_size, len(all_chunk_records))
+                    batch = all_chunk_records[batch_start:batch_end]
+                    batch_embeddings = embeddings[batch_start:batch_end]
+
+                    self._collection.add(
+                        ids=[r["id"] for r in batch],
+                        embeddings=batch_embeddings,
+                        documents=[r["raw_text"] for r in batch],
+                        metadatas=[r["metadata"] for r in batch],
+                    )
+
+                # Update image cache
                 self._page_images.update(local_page_images)
-                
-                if self._tokenized_corpus:
-                    self._bm25 = BM25Okapi(self._tokenized_corpus)
-                else:
-                    self._bm25 = None
+                self._indexed_filenames.add(filename)
                 self._index_ready = True
 
-            ocr_msg = ""
-            if local_ocr_pages:
-                ocr_msg = f" (OCR used on {len(local_ocr_pages)} pages)"
-            visual_msg = ""
-            if local_visual_pages:
-                visual_msg = f" (Visual content on {len(local_visual_pages)} pages)"
-            
-            final_msg = f"Indexed {len(local_pages_info)} pages of {filename}{ocr_msg}{visual_msg}"
-            logger.info(f"Index merge complete: {final_msg}")
-            
+            ocr_msg = f" (OCR on {len(local_ocr_pages)} pages)" if local_ocr_pages else ""
+            vis_msg = f" (Visuals on {len(local_visual_pages)} pages)" if local_visual_pages else ""
+            final_msg = (
+                f"Indexed {total} pages → {len(all_chunk_records)} chunks "
+                f"of {filename}{ocr_msg}{vis_msg}"
+            )
+            logger.info(f"Index complete: {final_msg}")
             _report("completed", 100, final_msg)
 
         except Exception as e:
@@ -211,58 +278,108 @@ class VisionEngine:
             if doc:
                 doc.close()
 
-    def search(self, queries: List[str], k_total: int = 5, prioritize_visuals: bool = False) -> List[Dict]:
+    # ── Search ─────────────────────────────────────────────────────────────
+
+    def search(
+        self,
+        queries: List[str],
+        k_total: int = 5,
+        prioritize_visuals: bool = False,
+    ) -> List[Dict]:
         """
-        Agentic search across multiple sub-queries.
-        Returns a deduplicated list of {"filename": str, "page_num": int, "score": float}
+        Semantic search across all indexed documents.
+
+        Returns a deduplicated list of:
+            {"filename": str, "page_num": int, "score": float, "text": str}
         """
         with self._lock:
-            if not self._index_ready or not self._bm25 or not queries:
+            if not self._index_ready or not queries:
                 return []
-            
-            page_scores = defaultdict(float)
-            
-            for query in queries:
-                tokenized_query = query.lower().split()
-                if not tokenized_query:
-                    continue
-                    
-                scores = self._bm25.get_scores(tokenized_query)
-                for i, score in enumerate(scores):
-                    if score > 0:
-                        # Normalize and boost
-                        page_id = f"{self._pages_info[i]['filename']}_{self._pages_info[i]['page_num']}"
-                        
-                        boost = 1.0
-                        if prioritize_visuals and page_id in self._visual_pages:
-                            # Massive boost to visual pages if the agent detected a visual intent
-                            boost = 2.0 
-                            
-                        page_scores[i] += (score * boost)
 
-            top_indices = []
+            model = _get_embedding_model()
+
+            # Embed all queries
+            query_embeddings = model.encode(
+                queries,
+                normalize_embeddings=True,
+            ).tolist()
+
+            # Accumulate results across all sub-queries
+            page_scores: Dict[str, float] = {}      # page_id → score
+            page_texts: Dict[str, List[str]] = {}    # page_id → [chunk texts]
+            page_info: Dict[str, Dict] = {}           # page_id → {filename, page_num}
+
+            n_results = min(k_total * 3, self._collection.count())
+            if n_results == 0:
+                return []
+
+            for q_embedding in query_embeddings:
+                results = self._collection.query(
+                    query_embeddings=[q_embedding],
+                    n_results=n_results,
+                    include=["documents", "metadatas", "distances"],
+                )
+
+                if not results or not results["ids"] or not results["ids"][0]:
+                    continue
+
+                for idx in range(len(results["ids"][0])):
+                    meta = results["metadatas"][0][idx]
+                    doc_text = results["documents"][0][idx]
+                    distance = results["distances"][0][idx]
+                    # ChromaDB cosine distance: 0 = identical, 2 = opposite
+                    # Convert to similarity score: 1 - (distance / 2)
+                    similarity = 1.0 - (distance / 2.0)
+
+                    page_id = f"{meta['filename']}_{meta['page_num']}"
+
+                    # Boost visual chunks if requested
+                    boost = 1.0
+                    if prioritize_visuals and meta.get("chunk_type") == "visual":
+                        boost = 1.5
+
+                    score = similarity * boost
+
+                    # Accumulate best score per page
+                    if page_id not in page_scores or score > page_scores[page_id]:
+                        page_scores[page_id] = score
+
+                    page_info[page_id] = {
+                        "filename": meta["filename"],
+                        "page_num": meta["page_num"],
+                    }
+
+                    if page_id not in page_texts:
+                        page_texts[page_id] = []
+                    if doc_text and doc_text not in page_texts[page_id]:
+                        page_texts[page_id].append(doc_text)
+
             if not page_scores:
-                # Semantic fallback: if zero keyword matches (e.g. "what is his name"), 
-                # return the most recently added pages up to k_total as assumed context.
-                start_idx = len(self._pages_info) - 1
-                end_idx = max(-1, start_idx - k_total)
-                top_indices = list(range(start_idx, end_idx, -1))
-            else:
-                # Sort globally by combined score
-                top_indices = sorted(page_scores.keys(), key=lambda idx: page_scores[idx], reverse=True)[:k_total]
-            
+                return []
+
+            # Sort by score, return top k
+            sorted_pages = sorted(
+                page_scores.keys(),
+                key=lambda pid: page_scores[pid],
+                reverse=True,
+            )[:k_total]
+
             results = []
-            for i in top_indices:
-                info = self._pages_info[i]
+            for page_id in sorted_pages:
+                info = page_info[page_id]
                 results.append({
                     "filename": info["filename"],
-                    "page_num": info["page_num"]
+                    "page_num": info["page_num"],
+                    "score": round(page_scores[page_id], 4),
+                    "retrieved_chunks": page_texts.get(page_id, []),
                 })
-                
+
             return results
 
+    # ── Page data access ───────────────────────────────────────────────────
+
     def get_page_images(self, pages_to_fetch: List[Dict]) -> Dict[str, str]:
-        """Fetch images. Input is list of dicts with 'filename' and 'page_num'."""
+        """Fetch page images. Input is list of dicts with 'filename' and 'page_num'."""
         with self._lock:
             result = {}
             for p in pages_to_fetch:
@@ -272,28 +389,68 @@ class VisionEngine:
             return result
 
     def get_page_info(self, filename: str, page_num: int) -> Optional[Dict]:
-        """Return stored info for a specific doc's page."""
-        with self._lock:
-            for info in self._pages_info:
-                if info["filename"] == filename and info["page_num"] == page_num:
-                    return info
+        """
+        Return stored chunk text for a specific page.
+        Queries ChromaDB for all chunks belonging to this page.
+        """
+        try:
+            results = self._collection.get(
+                where={
+                    "$and": [
+                        {"filename": filename},
+                        {"page_num": page_num},
+                    ]
+                },
+                include=["documents", "metadatas"],
+            )
+
+            if not results or not results["documents"]:
+                return None
+
+            # Combine all chunk texts for this page
+            text_parts = []
+            visual_parts = []
+            for doc, meta in zip(results["documents"], results["metadatas"]):
+                if meta.get("chunk_type") == "visual":
+                    visual_parts.append(doc)
+                else:
+                    text_parts.append(doc)
+
+            return {
+                "filename": filename,
+                "page_num": page_num,
+                "text": "\n".join(text_parts),
+                "visual_description": "\n".join(visual_parts) if visual_parts else "",
+            }
+        except Exception as e:
+            logger.warning(f"get_page_info failed: {e}")
             return None
 
-    def rebuild_index(self, pdf_path: str, status_callback: Optional[Callable[[str, int, str], None]] = None):
-        import uuid
-        # Invalidate the current run FIRST — this causes any running background thread to abort
+    def rebuild_index(
+        self,
+        pdf_path: str,
+        status_callback: Optional[Callable[[str, int, str], None]] = None,
+    ):
+        # Invalidate current run → causes any running thread to abort
         self._current_run_id = str(uuid.uuid4())
-        # Add to the unified index
         self.load_or_create_index(pdf_path, status_callback=status_callback)
+
+    # ── Properties ─────────────────────────────────────────────────────────
 
     @property
     def is_ready(self) -> bool:
         return self._index_ready
-        
+
+    @property
+    def chunk_count(self) -> int:
+        return self._collection.count()
+
     @property
     def ocr_page_count(self) -> int:
-        return len(self._ocr_pages)
+        # Approximate — not tracked persistently in Phase 2
+        return 0
 
     @property
     def visual_page_count(self) -> int:
-        return len(self._visual_pages)
+        # Approximate — not tracked persistently in Phase 2
+        return 0

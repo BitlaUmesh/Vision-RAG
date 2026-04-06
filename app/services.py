@@ -66,15 +66,30 @@ class VisionService:
         if not page_numbers or not engine:
             return ""
         parts = []
+        seen_pages = set()
         for p in page_numbers:
             fname = p["filename"]
             pnum = p["page_num"]
-            info = engine.get_page_info(fname, pnum)
-            if info:
-                part = f"\n--- {fname} (Page {pnum}) ---\n{info['text']}\n"
-                if info.get("visual_description"):
-                    part += f"\n[VISUAL CONTENT on {fname} Page {pnum}]\n{info['visual_description']}\n"
+            page_key = f"{fname}_{pnum}"
+
+            if page_key in seen_pages:
+                continue
+            seen_pages.add(page_key)
+
+            # Use retrieved chunks directly if available (from ChromaDB search)
+            retrieved_chunks = p.get("retrieved_chunks", [])
+            if retrieved_chunks:
+                chunk_text = "\n".join(retrieved_chunks)
+                part = f"\n--- {fname} (Page {pnum}) ---\n{chunk_text}\n"
                 parts.append(part)
+            else:
+                # Fallback: fetch full page info from engine
+                info = engine.get_page_info(fname, pnum)
+                if info:
+                    part = f"\n--- {fname} (Page {pnum}) ---\n{info['text']}\n"
+                    if info.get("visual_description"):
+                        part += f"\n[VISUAL CONTENT on {fname} Page {pnum}]\n{info['visual_description']}\n"
+                    parts.append(part)
         return "".join(parts)
 
     # ── prompt builder ────────────────────────────────────────────────────
@@ -106,9 +121,14 @@ class VisionService:
                 "6. For tables, extract and present data in a clear markdown table format.\n"
                 "7. If you are shown page images, READ THE TEXT DIRECTLY from the images "
                 "for maximum accuracy — do not rely solely on the OCR-extracted text.\n\n"
-                "IMPORTANT: The document text was extracted via OCR from handwritten pages. "
-                "There may be minor OCR errors. If the page images are provided, read the "
-                "actual handwriting in the images for the most accurate answer."
+                "== VISUAL CITATIONS (CRITICAL) ==\n"
+                "Every time you state a fact from the context, you MUST provide a visual citation "
+                "so the user can click it to see the exact text in the source document.\n"
+                "Format: [[Page X: \"exact continuous quote string from text\"]]\n"
+                "Example: The battery life is 10 hours [[Page 4: \"average continuous battery life of 10 hours\"]].\n"
+                "The quote string MUST be an exact substring from the text payload provided. Do not alter the letters or punctuation. Keep the quote brief (4-8 words).\n\n"
+                "IMPORTANT: The document text was extracted via OCR. "
+                "There may be minor OCR errors. Try to quote exactly as extracted."
             )
         else:
             prompt += (

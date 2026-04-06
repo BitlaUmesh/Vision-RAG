@@ -4,5 +4,6 @@ __pycache__/
 .env
 data/
 .byaldi/
+chromadb_data/
 .DS_Store
 venv/
