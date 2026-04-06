@@ -42,14 +42,9 @@ const STEP_LABELS: Record<string, string> = {
 
 // ── Indexing Overlay ───────────────────────────────────────────────────────
 function IndexingOverlay({ job, onClose }: { job: JobStatus; onClose: () => void }) {
-  const [mounted, setMounted] = useState(false);
   const isDone = job.status === "completed";
   const isError = job.status === "error";
   const currentStepIdx = STEP_ORDER.indexOf(job.status);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   const content = (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm animate-in fade-in-0 duration-300">
@@ -146,7 +141,7 @@ function IndexingOverlay({ job, onClose }: { job: JobStatus; onClose: () => void
     </div>
   );
 
-  if (!mounted) return null;
+  if (typeof document === "undefined") return null;
   return createPortal(content, document.body);
 }
 
